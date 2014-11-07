@@ -865,8 +865,6 @@ int main() {
 
     printf("planning path...\n");
     path.planPath([&](const ToolPath::step_t &step) {
-        uint8_t instruction = 0;
-
         if(step_no == 0) {
             prev_step = step;
             step_no++;
