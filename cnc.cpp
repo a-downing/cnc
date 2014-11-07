@@ -113,7 +113,7 @@ struct vector_t {
     }
 
     void print() const {
-        printf("%.6f %.6f %.6f\n", x, y, z);
+        printf("%.0f %.0f %.0f\n", x, y, z);
     }
 
     const vector_t& rotate(const quaternion_t&);
@@ -500,6 +500,10 @@ struct ToolPath {
         acc = 0;
     }
 
+    vector_t getPosition() const {
+        return pos * (1 / scaler);
+    }
+
     void setStepsPerMM(double s) {
         steps_per_mm = s;
     }
@@ -529,6 +533,7 @@ struct ToolPath {
         vector_t translate = _translate * scaler;
         vector_t axis = _axis.normalized();
         vector_t v = -center;
+
         v.rotate({axis, angle});
         v = v + (center + pos);
         v = v + translate;
@@ -548,11 +553,11 @@ struct ToolPath {
     }
 
     void absArc(const vector_t &center, const vector_t &axis, double angle, const vector_t &translate = {0,0,0}) {
-        relArc(center - pos, axis, angle, translate - pos);
+        relArc(center - getPosition(), axis, angle, translate - getPosition());
     }
 
     void absArc(const vector_t &center, const vector_t &axis, double angle) {
-        relArc(center - pos, axis, angle);
+        relArc(center - getPosition(), axis, angle);
     }
 
     void relMove(const vector_t &_to) {
@@ -563,7 +568,7 @@ struct ToolPath {
     }
 
     void absMove(const vector_t &to) {
-        relMove(to - pos);
+        relMove(to - getPosition());
     }
 
     void calculateJunctions() {
@@ -854,17 +859,39 @@ int main() {
     controller.setTimerFreq(64000000);
 
     path.setStepsPerMM(320);
-    path.setUnits(ToolPath::Units::STEP);
-    path.setVelocity(2500.0 / 60);
-    path.setAcceleration(2500.0 / 60);
+    path.setUnits(ToolPath::Units::INCH);
+    path.setVelocity(20.0 / 60);
+    path.setAcceleration(20.0 / 60);
 
-    path.relArc({0, -20000, 0}, {0, 0, 1}, pi * 2);
+    auto helicalDrill = [&](double tool_dia, double hole_dia, double depth, double doc) {
+        double arc_radius = (hole_dia - tool_dia) / 2;
+        double arc_radians = (depth / doc) * 2*pi;
+
+        vector_t center = path.getPosition();
+        path.relMove({arc_radius, 0, 0});
+        path.relArc(center - path.getPosition(), {0, 0, 1}, arc_radians, {0, 0, -depth});
+        path.relArc(center - path.getPosition(), {0, 0, 1}, 2*pi);
+        path.absMove(center);
+    };
+
+    path.absMove({-0.5, 0.5, 0});
+    helicalDrill(0.25, 0.375, 0.125, 0.02);
+
+    path.absMove({0.5, 0.5, 0});
+    helicalDrill(0.25, 0.375, 0.125, 0.02);
+
+    path.absMove({0.5, -0.5, 0});
+    helicalDrill(0.25, 0.375, 0.125, 0.02);
+
+    path.absMove({-0.5, -0.5, 0});
+    helicalDrill(0.25, 0.375, 0.125, 0.02);
 
     ToolPath::step_t prev_step;
     int step_no = 0;
 
     printf("planning path...\n");
     path.planPath([&](const ToolPath::step_t &step) {
+        step.pos.print();
         if(step_no == 0) {
             prev_step = step;
             step_no++;
