@@ -67,7 +67,7 @@ struct vector_t {
         return ::sqrt(x*x + y*y + z*z);
     }
 
-    double length2() const {
+    double lengthSquared() const {
         return x*x + y*y + z*z;
     }
 
@@ -113,7 +113,7 @@ struct vector_t {
     }
 
     void print() const {
-        printf("%.0f %.0f %.0f\n", x, y, z);
+        printf("%.9f %.9f %.9f\n", x, y, z);
     }
 
     const vector_t& rotate(const quaternion_t&);
@@ -302,6 +302,18 @@ struct ToolPath {
             m_acceleration(acceleration) {
         }
 
+        const vector_t &getArcCenter() const {
+            return m_v2;
+        }
+
+        double getArcRadius() const {
+            return m_v2.length();
+        }
+
+        double getArcRadians() const {
+            return m_angle;
+        }
+
         double getSpeed() const {
             return m_speed;
         }
@@ -431,6 +443,46 @@ struct ToolPath {
             return sqrt(speed*speed + 2 * -m_acceleration * distance);
         }
 
+        double getSpeedAtDistance(double d) {
+            double speed_max = getMaxMidpointSpeed();
+            double distance = getDistance();
+            double distance_accel = getDistanceAccelToSpeed(speed_max);
+            double distance_decel = getDistanceDeccelFromSpeed(speed_max);
+            double distance_coast = distance - (distance_accel + distance_decel);
+
+            if(d <= distance_accel) {
+                return getSpeedAccelDistance(getEntrySpeed(), d);
+            } else if(d > distance_accel && d <= distance_accel + distance_coast) {
+                return speed_max;
+            } else {
+                return getSpeedDeccelDistance(speed_max, distance - d);
+            }
+        }
+
+        double getTimeAccelDistance(double speed, double distance) {
+            return (sqrt(2*m_acceleration*distance + speed*speed) - speed) / m_acceleration;
+        }
+
+        double getTimeDeccelDistance(double speed, double distance) {
+            return (sqrt(2*-m_acceleration*distance + speed*speed) - speed) / -m_acceleration;
+        }
+
+        double getTimeToDistance(double d) {
+            double speed_max = getMaxMidpointSpeed();
+            double distance = getDistance();
+            double distance_accel = getDistanceAccelToSpeed(speed_max);
+            double distance_decel = getDistanceDeccelFromSpeed(speed_max);
+            double distance_coast = distance - (distance_accel + distance_decel);
+
+            if(d <= distance_accel) {
+                return getTimeAccelDistance(getEntrySpeed(), d);
+            } else if(d > distance_accel && d <= distance_accel + distance_coast) {
+                return getTimeAccelDistance(getEntrySpeed(), distance_accel) + (d - distance_accel) / speed_max;
+            } else {
+                return getTimeDeccelDistance(speed_max, distance - d) + getTimeAccelDistance(getEntrySpeed(), distance_accel) + (d - distance_accel) / speed_max;
+            }
+        }
+
         vector_t interpolate(double distance) const {
             vector_t result;
 
@@ -444,12 +496,10 @@ struct ToolPath {
                 const vector_t &translate = m_v4;
                 const double angle = distance / center.length();
 
-
                 result = -center;
                 result.rotate({axis, angle});
                 result = result + (center + start);
                 result = result + (translate * (angle / m_angle));
-
             }
 
             return result;
@@ -498,6 +548,12 @@ struct ToolPath {
         pos = {0, 0, 0};
         vel = 0;
         acc = 0;
+    }
+
+    void zero(int x, int y, int z) {
+        pos.x = x;
+        pos.y = y;
+        pos.z = z;
     }
 
     vector_t getPosition() const {
@@ -596,6 +652,7 @@ struct ToolPath {
             // with the given radius calculate the maximum speed
             // around the corner given a max centripetal acceleration
             double max_speed = sqrt(max_acceleration * radius);
+            max_speed = std::min({max_speed, prev.getSpeed(), next.getSpeed()});
 
             prev.setExitSpeed(max_speed);
             next.setEntrySpeed(max_speed);
@@ -605,135 +662,98 @@ struct ToolPath {
     void planPath(std::function<void(const step_t &)> callback) {
         calculateJunctions();
 
-        steps.clear();
-        vector_t pos = segments.front().getEntryPosition();
-        steps.push_back(step_plan_t(pos.round(), pos, 0));
-        ProximityPeakDetector<step_plan_t> detector(0.001);
-        detector.setTarget(steps.back(), steps.back().pos, steps.back().pos_exact);
-
+        double t_total = 0;
+        step_plan_t last_inserted({0, 0, 0}, {0, 0, 0}, 0);
         for(int idx = 0; idx < segments.size(); idx++) {
             Segment &segment = segments[idx];
             const double dd = 0.01;
-            double speed_max = segment.getMaxMidpointSpeed();
             double distance = segment.getDistance();
-            double distance_accel = segment.getDistanceAccelToSpeed(speed_max);
-            double distance_decel = segment.getDistanceDeccelFromSpeed(speed_max);
-            double distance_coast = distance - (distance_accel + distance_decel);
-            int num_steps = (idx == 0) ? 1 : 0;
+            std::vector<step_plan_t> segment_steps;
 
-            // acceleration phase
-            int iterations = (distance_accel / dd) + 1;
-            for(int i = 0; i < iterations + 1; i++) {
-                double d = (distance_accel / iterations) * i;
-                double speed = segment.getSpeedAccelDistance(segment.getEntrySpeed(), d);
-                vector_t v = segment.interpolate(d);
-
-                if(v.rounded() != steps.back().pos) {
-                    steps.emplace_back(v.rounded(), vector_t(0, 0, 0), 0);
-                    detector.setTarget(steps.back(), steps.back().pos, v);
-                    num_steps++;
-                }
-
-                if(detector.hasTarget()) {
-                    detector.update(v);
-
-                    if(detector.getPeak()) {
-                        detector.getTargetObject().pos_exact = detector.getPosition();
-                        detector.getTargetObject().speed = speed;
-                        detector.reset();
-                    }
-                }
+            if(idx == 0) {
+                vector_t pos = segments.front().getEntryPosition();
+                segment_steps.push_back(step_plan_t(pos, pos, 0));
+                last_inserted = segment_steps.back();
             }
 
-            // coast phase
-            iterations = (distance_coast / dd) + 1;
+            // discretize steps
+            int iterations = (segment.getDistance() / dd) + 1;
             for(int i = 0; i < iterations + 1; i++) {
-                double d = distance_accel + ((distance_coast / iterations) * i);
-                double speed = speed_max;
+                double d = (distance / iterations) * i;
                 vector_t v = segment.interpolate(d);
+                vector_t step_pos = v.rounded();
+                double speed = segment.getSpeedAtDistance(distance);
 
-                if(v.rounded() != steps.back().pos) {
-                    steps.emplace_back(v.rounded(), vector_t(0, 0, 0), 0);
-                    detector.setTarget(steps.back(), steps.back().pos, v);
-                    num_steps++;
-                }
+                if(step_pos != last_inserted.pos) {
+                    segment_steps.emplace_back(step_pos, vector_t(0, 0, 0), 0);
+                    last_inserted = segment_steps.back();
 
-                if(detector.hasTarget()) {
-                    detector.update(v);
-
-                    if(detector.getPeak()) {
-                        detector.getTargetObject().pos_exact = detector.getPosition();
-                        detector.getTargetObject().speed = speed;
-                        detector.reset();
+                    if(segment.getType() == Segment::Type::LINE) {
+                        vector_t v1 = segment.getEntryPosition() - step_pos;
+                        vector_t v2 = segment.getExitPosition() - segment.getEntryPosition();
+                        double t = -v1.dot(v2) / v2.lengthSquared();
+                        vector_t closest = segment.interpolate(segment.getDistance() * t);
+                        segment_steps.back().pos_exact = closest;
+                    } else if(segment.getType() == Segment::Type::ARC) {
+                        vector_t v1 = step_pos - (segment.getArcCenter() + segment.getEntryPosition());
+                        v1 = v1 * (segment.getArcRadius() / v1.length());
+                        v1 = v1 + segment.getEntryPosition() + segment.getArcCenter();
+                        segment_steps.back().pos_exact = v1;
                     }
-                }
-            }
 
-            // deceleration phase
-            iterations = (distance_decel / dd) + 1;
-            for(int i = 0; i < iterations + 1; i++) {
-                double _d = (distance_decel / iterations) * i;
-                double d = distance_accel + distance_coast + _d;
-                double speed = segment.getSpeedDeccelDistance(speed_max, _d);
-                vector_t v = segment.interpolate(d);
-
-                if(v.rounded() != steps.back().pos) {
-                    steps.emplace_back(v.rounded(), vector_t(0, 0, 0), 0);
-                    detector.setTarget(steps.back(), steps.back().pos, v);
-                    num_steps++;
-                }
-
-                if(detector.hasTarget()) {
-                    detector.update(v);
-
-                    if(detector.getPeak()) {
-                        detector.getTargetObject().pos_exact = detector.getPosition();
-                        detector.getTargetObject().speed = speed;
-                        detector.reset();
-                    }
+                    segment_steps.back().speed = speed;
                 }
             }
 
             std::vector<step_plan_t> steps_tmp;
-            steps_tmp.reserve(steps.size());
+            steps_tmp.reserve(segment_steps.size());
 
             // optimize the step path
-            for(int i = steps.size() - num_steps; i < steps.size();) {
+            for(int i = 0; i < segment_steps.size();) {
                 if(i > steps.size() - 3) {
-                     steps_tmp.emplace_back(steps[i]);
+                     steps_tmp.emplace_back(segment_steps[i]);
                      i++;
                      continue;
                 }
 
-                const vector_t v = steps[i + 2].pos - steps[i].pos;
-                const double d1 = (steps[i + 1].pos - steps[i + 1].pos_exact).length();
-                const double d2 = (steps[i + 2].pos - steps[i + 2].pos_exact).length();
+                const vector_t v = segment_steps[i + 2].pos - segment_steps[i].pos;
+                const double d1 = (segment_steps[i + 1].pos - segment_steps[i + 1].pos_exact).length();
+                const double d2 = (segment_steps[i + 2].pos - segment_steps[i + 2].pos_exact).length();
 
-                steps_tmp.emplace_back(steps[i]);
+                steps_tmp.emplace_back(segment_steps[i]);
 
                 if(std::max({std::abs(v.x), std::abs(v.y), std::abs(v.z)}) > 1) {
                     i++;
                 } else if(d2 <= d1) {
                     i += 2;
-                    num_steps--;
                 } else {
                     i++;
                 }
             }
 
-            steps = std::move(steps_tmp);
+            segment_steps = std::move(steps_tmp);
 
-            for(int i = steps.size() - num_steps; i < steps.size() - 1; i++) {
-                step_plan_t &next_step = steps[i + 1];
-                step_plan_t &prev_step = steps[i];
+            for(size_t i = 0; i < segment_steps.size(); i++) {
+                if(i == 0) {
+                    continue;
+                }
+
+                step_plan_t &next_step = segment_steps[i];
+                step_plan_t &prev_step = segment_steps[i - 1];
+                const double d = (next_step.pos - prev_step.pos).length();
                 const double d_exact = (next_step.pos_exact - prev_step.pos_exact).length();
                 const double v_avg = prev_step.speed + ((next_step.speed - prev_step.speed) / 2);
 
                 prev_step.t = d_exact / v_avg;
-                callback(step_t(prev_step.pos, prev_step.t));
-            }
 
-            callback(step_t(steps.back().pos, steps.back().t));
+                printf("t: %.9f\n", prev_step.t);
+
+                callback(step_t(prev_step.pos, prev_step.t));
+
+                if(idx == segments.size()) {
+                    callback(step_t(next_step.pos, 0));
+                }
+            }
         }
     }
 };
@@ -841,6 +861,7 @@ public:
         byte_0 = set_bits(byte_0, 2, 2, (step.z != 0) ? (uint8_t)1 : (uint8_t)0);
 
         uint32_t ticks = m_timer_freq * t;
+
         uint8_t byte_1 = get_bits(ticks, 23, 16);
         uint8_t byte_2 = get_bits(ticks, 15, 8);
         uint8_t byte_3 = get_bits(ticks, 7, 0);
@@ -858,10 +879,10 @@ int main() {
 
     controller.setTimerFreq(64000000);
 
-    path.setStepsPerMM(320);
+    path.setStepsPerMM(17);
     path.setUnits(ToolPath::Units::INCH);
-    path.setVelocity(20.0 / 60);
-    path.setAcceleration(20.0 / 60);
+    path.setVelocity(25.0 / 60);
+    path.setAcceleration(500.0 / 60);
 
     auto helicalDrill = [&](double tool_dia, double hole_dia, double depth, double doc) {
         double arc_radius = (hole_dia - tool_dia) / 2;
@@ -878,6 +899,7 @@ int main() {
     helicalDrill(0.25, 0.375, 0.125, 0.02);
 
     path.absMove({0.5, 0.5, 0});
+
     helicalDrill(0.25, 0.375, 0.125, 0.02);
 
     path.absMove({0.5, -0.5, 0});
@@ -886,12 +908,17 @@ int main() {
     path.absMove({-0.5, -0.5, 0});
     helicalDrill(0.25, 0.375, 0.125, 0.02);
 
+    path.absMove({0, 0, 0});
+
+    //path.relMove({4, 0, 0});
+
     ToolPath::step_t prev_step;
     int step_no = 0;
 
     printf("planning path...\n");
     path.planPath([&](const ToolPath::step_t &step) {
-        step.pos.print();
+        //step.pos.print();
+
         if(step_no == 0) {
             prev_step = step;
             step_no++;

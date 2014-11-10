@@ -1,5 +1,5 @@
 CC=g++
-CXXFLAGS=-std=c++14 -O2
+CXXFLAGS=-std=c++14 -O2 -ggdb3
 
 all: cnc
 
