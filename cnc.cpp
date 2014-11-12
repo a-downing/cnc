@@ -455,7 +455,7 @@ struct ToolPath {
             } else if(d > distance_accel && d <= distance_accel + distance_coast) {
                 return speed_max;
             } else {
-                return getSpeedDeccelDistance(speed_max, distance - d);
+                return getSpeedDeccelDistance(speed_max, d - (distance_accel + distance_coast));
             }
         }
 
@@ -682,9 +682,9 @@ struct ToolPath {
                 double d = (distance / iterations) * i;
                 vector_t v = segment.interpolate(d);
                 vector_t step_pos = v.rounded();
-                double speed = segment.getSpeedAtDistance(distance);
 
                 if(step_pos != last_inserted.pos) {
+                    double speed = segment.getSpeedAtDistance(d);
                     segment_steps.emplace_back(step_pos, vector_t(0, 0, 0), 0);
                     last_inserted = segment_steps.back();
 
@@ -744,9 +744,8 @@ struct ToolPath {
                 const double d_exact = (next_step.pos_exact - prev_step.pos_exact).length();
                 const double v_avg = prev_step.speed + ((next_step.speed - prev_step.speed) / 2);
 
-                prev_step.t = d_exact / v_avg;
-
-                printf("t: %.9f\n", prev_step.t);
+                //prev_step.t = d_exact / v_avg;
+                prev_step.t = d / v_avg;
 
                 callback(step_t(prev_step.pos, prev_step.t));
 
@@ -879,10 +878,10 @@ int main() {
 
     controller.setTimerFreq(64000000);
 
-    path.setStepsPerMM(17);
+    path.setStepsPerMM(320);
     path.setUnits(ToolPath::Units::INCH);
-    path.setVelocity(25.0 / 60);
-    path.setAcceleration(500.0 / 60);
+    path.setVelocity(75.0 / 60);
+    path.setAcceleration(1);
 
     auto helicalDrill = [&](double tool_dia, double hole_dia, double depth, double doc) {
         double arc_radius = (hole_dia - tool_dia) / 2;
@@ -895,18 +894,22 @@ int main() {
         path.absMove(center);
     };
 
-    path.absMove({-0.5, 0.5, 0});
-    helicalDrill(0.25, 0.375, 0.125, 0.02);
+    /*path.absMove({1, 0, 0});
+    path.absMove({0, -1, 0});
+    path.absMove({-1, 0, 0});
+    path.absMove({0, 1, 0});*/
 
-    path.absMove({0.5, 0.5, 0});
+    path.absMove({-1.5, 1.5, 0});
+    helicalDrill(0.25, 1, 0.125, 0.02);
 
-    helicalDrill(0.25, 0.375, 0.125, 0.02);
+    path.absMove({1.5, 1.5, 0});
+    helicalDrill(0.25, 1, 0.125, 0.02);
 
-    path.absMove({0.5, -0.5, 0});
-    helicalDrill(0.25, 0.375, 0.125, 0.02);
+    path.absMove({1.5, -1.5, 0});
+    helicalDrill(0.25, 1, 0.125, 0.02);
 
-    path.absMove({-0.5, -0.5, 0});
-    helicalDrill(0.25, 0.375, 0.125, 0.02);
+    path.absMove({-1.5, -1.5, 0});
+    helicalDrill(0.25, 1, 0.125, 0.02);
 
     path.absMove({0, 0, 0});
 
@@ -917,8 +920,6 @@ int main() {
 
     printf("planning path...\n");
     path.planPath([&](const ToolPath::step_t &step) {
-        //step.pos.print();
-
         if(step_no == 0) {
             prev_step = step;
             step_no++;
